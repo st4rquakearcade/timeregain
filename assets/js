@@ -1,0 +1,421 @@
+/* =============================================================
+   admin.js — Admin (작성글 관리 / 스킨 에디터 / 외장 스토리지)
+   ============================================================= */
+(function () {
+  "use strict";
+  var root = (window.TR && window.TR.root) || "../";
+  var $ = function (i) { return document.getElementById(i); };
+
+  /* ---------- 현재 사용자 표시 + 로그아웃 ---------- */
+  (function () {
+    var u = window.TRAuth && TRAuth.current();
+    if (u) $("adm-user").textContent = (u.nick || u.id) + " (" + (TRAuth.ROLES[u.role] || u.role) + ")";
+    $("adm-logout").addEventListener("click", function () {
+      if (!confirm("로그아웃 하겠습니까?")) return;
+      TRAuth.logout();
+      location.replace("login.html");
+    });
+  })();
+
+  /* ---------- 탭 ---------- */
+  var tabs = [].slice.call(document.querySelectorAll(".tab"));
+  tabs.forEach(function (t) {
+    t.addEventListener("click", function () {
+      tabs.forEach(function (x) { x.classList.toggle("is-active", x === t); });
+      ["posts", "members", "skin", "storage"].forEach(function (name) {
+        $("panel-" + name).hidden = (name !== t.dataset.tab);
+      });
+      if (t.dataset.tab === "storage") renderStorage();
+      if (t.dataset.tab === "members") renderMembers();
+    });
+  });
+
+  /* =============================================================
+     작성글 관리
+     ============================================================= */
+  var elBoard = $("a-board");
+  var ALL = "__all__";
+  var optAll = document.createElement("option");
+  optAll.value = ALL; optAll.textContent = "전체 게시판";
+  elBoard.appendChild(optAll);
+  Object.keys(TRPosts.BOARDS).forEach(function (k) {
+    var o = document.createElement("option");
+    o.value = k; o.textContent = TRPosts.BOARDS[k];
+    elBoard.appendChild(o);
+  });
+
+  function plain(html) { var d = document.createElement("div"); d.innerHTML = html || ""; return (d.textContent || "").replace(/\s+/g, " ").trim(); }
+
+  function renderPosts() {
+    TRPosts.all().then(function (arr) {
+      var board = elBoard.value;
+      var list = arr.slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+      if (board !== ALL) list = list.filter(function (p) { return p.board === board; });
+      var tb = $("a-list");
+      if (!list.length) { tb.innerHTML = '<tr><td colspan="4" class="admin-empty">글이 없습니다.</td></tr>'; return; }
+      tb.innerHTML = list.map(function (p) {
+        var title = TRPosts.escapeHtml(p.title || plain(p.html).slice(0, 40) || "(제목 없음)");
+        var view = root + "pages/post.html?board=" + encodeURIComponent(p.board) + "&id=" + encodeURIComponent(p.id);
+        return '<tr data-id="' + p.id + '" data-board="' + p.board + '">' +
+          '<td class="t-board">' + TRPosts.escapeHtml(TRPosts.BOARDS[p.board] || p.board) + '</td>' +
+          '<td class="t-title"><a href="' + view + '">' + (p.pinned ? "📌 " : "") + title + '</a></td>' +
+          '<td class="t-date">' + TRPosts.formatDate(p.createdAt) + '</td>' +
+          '<td><div class="t-act"><button class="btn btn--sm" data-act="edit">수정</button>' +
+          '<button class="btn btn--sm btn--danger" data-act="del">삭제</button></div></td>' +
+        '</tr>';
+      }).join("");
+    });
+  }
+  elBoard.addEventListener("change", renderPosts);
+
+  $("a-list").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    var tr = btn.closest("tr");
+    var id = tr.dataset.id, board = tr.dataset.board;
+    if (btn.dataset.act === "edit") {
+      window.open(root + "pages/write.html?board=" + encodeURIComponent(board) + "&id=" + encodeURIComponent(id), "_blank", "noopener");
+    } else if (btn.dataset.act === "del") {
+      if (!confirm("이 글을 삭제할까요? (이 브라우저의 작업본에서 삭제)")) return;
+      TRPosts.remove(id).then(renderPosts);
+    }
+  });
+
+  $("a-write").addEventListener("click", function () {
+    var board = elBoard.value === ALL ? "notice" : elBoard.value;
+    window.open(root + "pages/write.html?board=" + encodeURIComponent(board), "_blank", "noopener");
+  });
+  $("a-server-save").addEventListener("click", function () {
+    var btn = $("a-server-save"), st = $("a-server-status");
+    btn.disabled = true; btn.textContent = "저장 중…";
+    TRPosts.pushToServer()
+      .then(function (arr) {
+        st.textContent = "✓ 서버에 저장했습니다. (" + arr.length + "개 글)";
+        st.style.color = "var(--blue)";
+      })
+      .catch(function (e) {
+        st.textContent = "✗ " + (e.message || "저장 실패");
+        st.style.color = "#ff6b6b";
+      })
+      .finally(function () { btn.disabled = false; btn.textContent = "서버에 저장"; });
+  });
+  $("a-import").addEventListener("change", function () {
+    var f = this.files && this.files[0]; if (!f) return;
+    TRPosts.importJSON(f).then(function () { alert("불러왔습니다."); renderPosts(); })
+      .catch(function () { alert("JSON을 읽을 수 없습니다."); });
+  });
+
+  // 다른 탭/창에서 글이 바뀌면 목록 갱신
+  window.addEventListener("focus", renderPosts);
+  renderPosts();
+
+  /* =============================================================
+     스킨 에디터 (지정 3색)
+     ============================================================= */
+  var SK = [
+    { key: "blue",  color: "sk-blue",  text: "sk-blue-t",  sw: "sw-blue" },
+    { key: "light", color: "sk-light", text: "sk-light-t", sw: "sw-light" },
+    { key: "dark",  color: "sk-dark",  text: "sk-dark-t",  sw: "sw-dark" }
+  ];
+  function curColor(key) {
+    var saved = TRTheme.get();
+    return saved[key] || TRTheme.DEFAULTS[key];
+  }
+  function syncSwatches() {
+    SK.forEach(function (f) {
+      var v = $(f.text).value;
+      $(f.sw).style.background = v;
+    });
+  }
+  function fillSkin() {
+    SK.forEach(function (f) {
+      var v = curColor(f.key);
+      $(f.color).value = v; $(f.text).value = v;
+    });
+    syncSwatches();
+  }
+  function liveApply() {
+    var patch = {};
+    SK.forEach(function (f) { patch[f.key] = $(f.text).value; });
+    // 미리보기만: 저장 없이 즉시 적용
+    TRTheme.apply(patch);
+    syncSwatches();
+  }
+  SK.forEach(function (f) {
+    $(f.color).addEventListener("input", function () { $(f.text).value = this.value; liveApply(); });
+    $(f.text).addEventListener("input", function () {
+      if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(this.value)) $(f.color).value = this.value;
+      liveApply();
+    });
+  });
+  $("sk-save").addEventListener("click", function () {
+    var patch = {};
+    SK.forEach(function (f) { patch[f.key] = $(f.text).value; });
+    TRTheme.set(patch); // theme.js 내부에서 Firebase 자동 push
+    var msg = "스킨을 저장했습니다.";
+    if (window.TRDb && TRDb.ready()) msg += " (Firebase 서버에도 반영됨)";
+    $("sk-status").textContent = msg;
+  });
+  $("sk-reset").addEventListener("click", function () {
+    TRTheme.reset();
+    fillSkin();
+    $("sk-status").textContent = "기본값으로 복원했습니다.";
+  });
+  fillSkin();
+
+  /* =============================================================
+     외장 스토리지 (TRDrive)
+     ============================================================= */
+  function renderStorage() {
+    if (!window.TRDrive) return;
+    var u = TRDrive.usage();
+    var m = $("st-meter");
+    m.classList.toggle("is-low", u.low);
+    $("st-fill").style.width = Math.round(u.ratio * 100) + "%";
+    $("st-text").textContent = "사용 " + fmt(u.used) + " / 예산 " + fmt(u.budget);
+    $("st-free").textContent = "잔여 " + fmt(u.free) + (u.low ? " · 부족" : "");
+    var f = TRDrive.getFolder();
+    $("st-folder").value = f ? f.url : "";
+    $("st-folder-cur").textContent = f ? ("등록됨: " + f.url) : "등록된 폴더가 없습니다.";
+    $("st-budget").value = (TRDrive.getBudget() / TRDrive.GB).toFixed(2);
+    $("st-extra").value = Math.round(TRDrive.getExtra() / 1048576);
+  }
+  function fmt(n) { return window.TRImg ? TRImg.fmtBytes(n) : (n + " B"); }
+  // TRImg 는 admin 에 없으므로 간이 포맷
+  function fmtBytes(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1073741824) return (n / 1048576).toFixed(2) + " MB";
+    return (n / 1073741824).toFixed(2) + " GB";
+  }
+  fmt = fmtBytes;
+
+  $("st-folder-save").addEventListener("click", function () {
+    try { var rec = TRDrive.setFolder($("st-folder").value.trim()); $("st-status").textContent = "폴더 등록: " + rec.url; renderStorage(); }
+    catch (e) { alert(e.message || "폴더 링크 오류"); }
+  });
+  $("st-folder-clear").addEventListener("click", function () { TRDrive.clearFolder(); renderStorage(); $("st-status").textContent = "폴더를 해제했습니다."; });
+  $("st-save").addEventListener("click", function () {
+    var gb = parseFloat($("st-budget").value), mb = parseFloat($("st-extra").value);
+    if (gb && gb > 0) TRDrive.setBudget(Math.round(gb * TRDrive.GB));
+    TRDrive.setExtra(Math.round((mb || 0) * 1048576));
+    renderStorage();
+    $("st-status").textContent = "스토리지 설정을 저장했습니다.";
+  });
+
+  /* =============================================================
+     플레이리스트 편집 (BGM) — 스킨 에디터 영역
+     데이터: localStorage(tr.bgm.v1) / 공개본 data/bgm.json
+     ============================================================= */
+  var BGM_KEY = "tr.bgm.v1";
+  var pl = [];
+  function escA(s) { return String(s == null ? "" : s).replace(/"/g, "&quot;").replace(/</g, "&lt;"); }
+  function plRenderRows() {
+    var box = $("pl-rows");
+    if (!pl.length) { box.innerHTML = '<p class="hint">곡이 없습니다. ＋ 곡 추가로 시작하세요.</p>'; return; }
+    box.innerHTML = pl.map(function (t, i) {
+      return '<div class="plrow" data-i="' + i + '">' +
+        '<input class="field" data-f="title" placeholder="제목" value="' + escA(t.title) + '" />' +
+        '<input class="field" data-f="artist" placeholder="가수 이름" value="' + escA(t.artist) + '" />' +
+        '<input class="field" data-f="url" placeholder="YouTube 링크" value="' + escA(t.url) + '" />' +
+        '<div class="plrow-act">' +
+          '<button data-a="up" title="위로" type="button">▲</button>' +
+          '<button data-a="down" title="아래로" type="button">▼</button>' +
+          '<button data-a="del" title="삭제" type="button">×</button>' +
+        '</div></div>';
+    }).join("");
+  }
+  $("pl-rows").addEventListener("input", function (e) {
+    var inp = e.target.closest("input[data-f]"); if (!inp) return;
+    var i = +inp.closest(".plrow").dataset.i;
+    pl[i][inp.dataset.f] = inp.value;
+  });
+  $("pl-rows").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-a]"); if (!b) return;
+    var i = +b.closest(".plrow").dataset.i, a = b.dataset.a;
+    if (a === "del") pl.splice(i, 1);
+    else if (a === "up" && i > 0) { var x = pl[i - 1]; pl[i - 1] = pl[i]; pl[i] = x; }
+    else if (a === "down" && i < pl.length - 1) { var y = pl[i + 1]; pl[i + 1] = pl[i]; pl[i] = y; }
+    plRenderRows();
+  });
+  $("pl-add").addEventListener("click", function () { pl.push({ title: "", artist: "", url: "" }); plRenderRows(); });
+  $("pl-save").addEventListener("click", function () {
+    var clean = pl.map(function (t) { return { url: (t.url || "").trim(), title: (t.title || "").trim(), artist: (t.artist || "").trim() }; })
+                  .filter(function (t) { return t.url || t.title; });
+    try { localStorage.setItem(BGM_KEY, JSON.stringify(clean)); } catch (e) {}
+    pl = clean; plRenderRows();
+    $("pl-status").textContent = "저장했습니다. 하단 플레이어(이 브라우저)에 반영됩니다.";
+  });
+  $("pl-server-save").addEventListener("click", function () {
+    var btn = $("pl-server-save"), st = $("pl-status");
+    var clean = pl.map(function (t) { return { url: (t.url||"").trim(), title: (t.title||"").trim(), artist: (t.artist||"").trim() }; })
+                  .filter(function (t) { return t.url || t.title; });
+    if (!window.TRDb || !TRDb.ready()) { st.textContent = "✗ Firebase 미연결 — firebase-config.js 설정을 확인하세요."; st.style.color="#ff6b6b"; return; }
+    btn.disabled = true; btn.textContent = "저장 중…";
+    try { localStorage.setItem(BGM_KEY, JSON.stringify(clean)); } catch (e) {}
+    TRDb.push("bgm", clean)
+      .then(function () { st.textContent = "✓ 플레이리스트를 서버에 저장했습니다."; st.style.color="var(--blue)"; })
+      .catch(function (e) { st.textContent = "✗ " + (e.message||"저장 실패"); st.style.color="#ff6b6b"; })
+      .finally(function () { btn.disabled = false; btn.textContent = "서버에 저장"; });
+  });
+  (function loadPlaylist() {
+    var local = null;
+    try { local = JSON.parse(localStorage.getItem(BGM_KEY)); } catch (e) {}
+    if (Array.isArray(local)) { pl = local; plRenderRows(); return; }
+    fetch(root + "data/bgm.json", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (j) { pl = Array.isArray(j) ? j : (j.tracks || []); plRenderRows(); })
+      .catch(function () { pl = []; plRenderRows(); });
+  })();
+
+  /* =============================================================
+     회원 관리 (회원 설정 + 회원 목록)  — TRAuth
+     ============================================================= */
+  var msFilter = { key: "id", q: "" };
+  function esc(s) { return TRPosts.escapeHtml(s); }
+  function adminCount() { return TRAuth.users().filter(function (u) { return u.role === "admin" && !u.blocked; }).length; }
+
+  function renderMembers() {
+    if (!window.TRAuth) return;
+    var set = TRAuth.settings();
+    $("ms-role").value = set.signupRole;
+    $("ms-days").value = set.deleteDays;
+    $("ms-words").value = (set.bannedWords || []).join(", ");
+    $("ms-mails").value = (set.bannedEmails || []).join(", ");
+    renderMemberList();
+  }
+  function csv(s) { return (s || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
+
+  $("ms-save").addEventListener("click", function () {
+    TRAuth.saveSettings({
+      signupRole: $("ms-role").value,
+      deleteDays: parseInt($("ms-days").value, 10) || 0,
+      bannedWords: csv($("ms-words").value),
+      bannedEmails: csv($("ms-mails").value)
+    });
+    $("ms-status").textContent = "회원 설정을 저장했습니다.";
+  });
+
+  function renderMemberList() {
+    var list = TRAuth.users().slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+    var q = msFilter.q.trim().toLowerCase();
+    if (q) list = list.filter(function (u) {
+      if (msFilter.key === "id") return u.id.toLowerCase().indexOf(q) >= 0;
+      if (msFilter.key === "nick") return (u.nick || "").toLowerCase().indexOf(q) >= 0;
+      if (msFilter.key === "role") return ((TRAuth.ROLES[u.role] || u.role) + " " + u.role).toLowerCase().indexOf(q) >= 0;
+      if (msFilter.key === "email") return (u.email || "").toLowerCase().indexOf(q) >= 0;
+      if (msFilter.key === "date") return TRPosts.formatDate(u.createdAt).indexOf(q) >= 0;
+      return true;
+    });
+    var tb = $("ms-list");
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="7" class="admin-empty">회원이 없습니다.</td></tr>'; return; }
+    var roleOpts = function (r) { return ["admin", "editor", "member"].map(function (k) { return '<option value="' + k + '"' + (k === r ? " selected" : "") + ">" + TRAuth.ROLES[k] + "</option>"; }).join(""); };
+    tb.innerHTML = list.map(function (u) {
+      return '<tr data-id="' + esc(u.id) + '">' +
+        '<td><input type="checkbox" class="ms-ck" /></td>' +
+        '<td class="t-title">' + esc(u.nick || u.id) + '<div style="font-size:.76rem;color:var(--text-muted)">@' + esc(u.id) + '</div></td>' +
+        '<td><select class="field ms-role-sel">' + roleOpts(u.role) + '</select></td>' +
+        '<td class="t-date">' + esc(u.email || "") + '</td>' +
+        '<td style="text-align:center"><input type="checkbox" class="ms-block"' + (u.blocked ? " checked" : "") + ' /></td>' +
+        '<td class="t-date">' + TRPosts.formatDate(u.createdAt) + '</td>' +
+        '<td><div class="t-act"><button class="btn btn--sm btn--danger" data-act="del">삭제</button></div></td>' +
+      '</tr>';
+    }).join("");
+  }
+
+  $("ms-key").addEventListener("change", function () { msFilter.key = this.value; });
+  $("ms-search-btn").addEventListener("click", function () { msFilter.q = $("ms-q").value; renderMemberList(); });
+  $("ms-q").addEventListener("keydown", function (e) { if (e.key === "Enter") { msFilter.q = this.value; renderMemberList(); } });
+  $("ms-all").addEventListener("change", function () {
+    var on = this.checked; [].forEach.call($("ms-list").querySelectorAll(".ms-ck"), function (c) { c.checked = on; });
+  });
+  $("ms-export").addEventListener("click", function () { TRAuth.exportJSON(); });
+
+  $("ms-list").addEventListener("change", function (e) {
+    var tr = e.target.closest("tr[data-id]"); if (!tr) return;
+    var id = tr.dataset.id, me = TRAuth.current();
+    if (e.target.classList.contains("ms-role-sel")) {
+      var newRole = e.target.value;
+      var u = TRAuth.users().filter(function (x) { return x.id === id; })[0];
+      if (u && u.role === "admin" && newRole !== "admin" && adminCount() <= 1) { alert("마지막 관리자는 권한을 변경할 수 없습니다."); renderMemberList(); return; }
+      TRAuth.updateUser(id, { role: newRole });
+      if (me && me.id === id && newRole !== "admin") { alert("본인 권한이 변경되어 로그아웃됩니다."); TRAuth.logout(); location.replace("login.html"); }
+    } else if (e.target.classList.contains("ms-block")) {
+      var blocked = e.target.checked;
+      var u2 = TRAuth.users().filter(function (x) { return x.id === id; })[0];
+      if (blocked && u2 && u2.role === "admin" && adminCount() <= 1) { alert("마지막 관리자는 차단할 수 없습니다."); e.target.checked = false; return; }
+      TRAuth.updateUser(id, { blocked: blocked });
+    }
+  });
+  $("ms-list").addEventListener("click", function (e) {
+    var b = e.target.closest('button[data-act="del"]'); if (!b) return;
+    var tr = b.closest("tr[data-id]"), id = tr.dataset.id;
+    var u = TRAuth.users().filter(function (x) { return x.id === id; })[0];
+    if (u && u.role === "admin" && adminCount() <= 1) { alert("마지막 관리자는 삭제할 수 없습니다."); return; }
+    if (!confirm("이 회원을 삭제할까요?")) return;
+    var me = TRAuth.current();
+    TRAuth.removeUser(id); renderMemberList();
+    if (me && me.id === id) { TRAuth.logout(); location.replace("login.html"); }
+  });
+  $("ms-del-sel").addEventListener("click", function () {
+    var rows = [].slice.call($("ms-list").querySelectorAll("tr[data-id]")).filter(function (tr) { var c = tr.querySelector(".ms-ck"); return c && c.checked; });
+    if (!rows.length) { alert("선택된 회원이 없습니다."); return; }
+    if (!confirm(rows.length + "명을 삭제할까요?")) return;
+    rows.forEach(function (tr) {
+      var id = tr.dataset.id, u = TRAuth.users().filter(function (x) { return x.id === id; })[0];
+      if (u && u.role === "admin" && adminCount() <= 1) return; // 마지막 관리자 보호
+      TRAuth.removeUser(id);
+    });
+    renderMemberList();
+  });
+
+  /* =============================================================
+     폰트 관리 (TRTheme.fonts) — 로컬/웹폰트 업로드 + 적용
+     ============================================================= */
+  function fontFormat(name) {
+    var m = (name || "").toLowerCase().match(/\.(woff2|woff|ttf|otf)(\?|#|$)/);
+    return m ? ({ woff2: "woff2", woff: "woff", ttf: "truetype", otf: "opentype" })[m[1]] : "";
+  }
+  function renderFonts() {
+    if (!window.TRTheme) return;
+    var d = TRTheme.fonts.get(), list = $("fnt-list");
+    if (!d.faces.length) list.innerHTML = '<p class="fnt-empty">등록된 폰트가 없습니다.</p>';
+    else list.innerHTML = d.faces.map(function (f) {
+      return '<div class="fnt-item" data-name="' + esc(f.name) + '">' +
+        '<span class="fnt-name">' + esc(f.name) + '</span>' +
+        '<span class="fnt-prev" style="font-family:&quot;' + esc(f.name) + '&quot;,sans-serif">TIME REGAINED 가나다 123</span>' +
+        '<button class="btn btn--sm btn--danger" data-act="del">삭제</button></div>';
+    }).join("");
+    var opt = '<option value="">기본</option>' + d.faces.map(function (f) { return '<option value="' + esc(f.name) + '">' + esc(f.name) + "</option>"; }).join("");
+    $("fnt-display").innerHTML = opt; $("fnt-display").value = d.display || "";
+    $("fnt-body").innerHTML = opt; $("fnt-body").value = d.body || "";
+  }
+  $("fnt-file-add").addEventListener("click", function () {
+    var f = $("fnt-file").files && $("fnt-file").files[0], name = $("fnt-file-name").value.trim();
+    if (!f) { alert("폰트 파일을 선택하세요."); return; }
+    if (!name) { alert("폰트 이름을 입력하세요."); return; }
+    var fr = new FileReader();
+    fr.onload = function () {
+      TRTheme.fonts.add({ name: name, src: fr.result, format: fontFormat(f.name) });
+      $("fnt-file").value = ""; $("fnt-file-name").value = ""; renderFonts();
+      $("fnt-status").textContent = "‘" + name + "’ 폰트를 추가했습니다.";
+    };
+    fr.readAsDataURL(f);
+  });
+  $("fnt-url-add").addEventListener("click", function () {
+    var url = $("fnt-url").value.trim(), name = $("fnt-url-name").value.trim();
+    if (!url || !name) { alert("URL과 폰트 이름을 모두 입력하세요."); return; }
+    TRTheme.fonts.add({ name: name, src: url, format: fontFormat(url) });
+    $("fnt-url").value = ""; $("fnt-url-name").value = ""; renderFonts();
+    $("fnt-status").textContent = "‘" + name + "’ 폰트를 추가했습니다.";
+  });
+  $("fnt-list").addEventListener("click", function (e) {
+    var b = e.target.closest('button[data-act="del"]'); if (!b) return;
+    TRTheme.fonts.remove(b.closest(".fnt-item").dataset.name); renderFonts();
+  });
+  $("fnt-save").addEventListener("click", function () {
+    var d = TRTheme.fonts.get(); d.display = $("fnt-display").value; d.body = $("fnt-body").value;
+    TRTheme.fonts.save(d); $("fnt-status").textContent = "폰트를 적용했습니다. 모든 페이지에 반영됩니다.";
+  });
+  renderFonts();
+})();
